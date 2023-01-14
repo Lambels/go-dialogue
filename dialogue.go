@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"io"
+	"net/http"
 	"strings"
 	"sync"
 )
@@ -70,12 +71,13 @@ func (d *Dialogue) Start() error {
 
 	scan := bufio.NewScanner(d.R)
 	for {
+        d.exchangeWg.Add(1)
 		tkn, err := d.startExchange(scan)
 		if err != nil {
+            d.exchangeWg.Add(1)
 			return err
 		}
 
-		d.exchangeWg.Add(1)
 		cmd, args, err := parseRawCmd(tkn)
 		if err != nil {
 			d.exchangeWg.Done()
