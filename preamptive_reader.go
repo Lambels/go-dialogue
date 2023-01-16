@@ -24,15 +24,15 @@ func NewPreamptiveReader(ctx context.Context, r io.Reader) *PreamptiveReader {
 }
 
 // PreamptiveReader is a wrapper around r which provides cancellable reads. Reads are 1:1 up untill the context gets cancelled.
-// Calls to read after the context cancellation can block untill the previous read opperation is over. Once the read is over 
-// the previous buffer provided by the cancelled read call will be consumed on each subsequent read call till its all consumed and 
+// Calls to read after the context cancellation can block untill the previous read opperation is over. Once the read is over
+// the previous buffer provided by the cancelled read call will be consumed on each subsequent read call till its all consumed and
 // io.EOF is returned.
 //
 // IMPORTANT:
 //
 // Concurrent read calls will return an error.
 //
-// The read call to the source reader isnt cancelled itself, only the wrapped Read call returns early, the 
+// The read call to the source reader isnt cancelled itself, only the wrapped Read call returns early, the
 // source read wont get cleaned up unitl the previous buffer is consumed.
 //
 // inspired by https://benjamincongdon.me/blog/2020/04/23/Cancelable-Reads-in-Go/
@@ -107,6 +107,12 @@ func (r *PreamptiveReader) Read(buf []byte) (int, error) {
 	}
 	defer r.claimRead.Store(false)
 
+	// check if we are claiming a faulty read, if when claiming a reader we dont have an error we will
+	// either be the first ones to find out about the error or find no error at all.
+	if r.err != nil {
+		return 0, r.err
+	}
+
 	// check wether we are calling after a cancelled context or before.
 	select {
 	case <-r.ctx.Done(): // call after cancelled context. Read only from memory, this opperation is usually fast excluding the times when we wait for an ongoing read.
@@ -133,6 +139,8 @@ func (r *PreamptiveReader) Read(buf []byte) (int, error) {
 	case <-r.ctx.Done():
 		return 0, r.ctx.Err()
 	case n, ok := <-r.bytesRead:
+		r.buf = nil // nullate the buffer when a 1:1 communication has gone through.
+		
 		if !ok {
 			return 0, r.err
 		}
