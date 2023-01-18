@@ -19,12 +19,9 @@ func main() {
 		W:      os.Stdout,
 	}
 
-	fs := flag.NewFlagSet("echo", flag.PanicOnError)
-
 	d.RegisterCommands(
 		&dialogue.Command{
 			Name:    "echo",
-			FlagSet: fs,
 			Exec:    exec,
 		},
 	)
