@@ -136,8 +136,7 @@ func (c *Command) Context() context.Context {
 	return c.ctx
 }
 
-// Parse parses a chain of commands returning a call chain and any error which occured during the
-// parsing.
+// parse the command trees recursively building the command chain.
 func (c *Command) parse(args []string) (*CallChain, error) {
 	if err := c.init(); err != nil {
 		return nil, err
@@ -147,15 +146,16 @@ func (c *Command) parse(args []string) (*CallChain, error) {
 		return nil, err
 	}
 
-	// search sub commands in command args.
 	cmdArgs := c.FlagSet.Args()
 
+    // search sub commands in command args.
 	if len(cmdArgs) > 0 {
 		for _, subCmd := range c.SubCommands {
 			for i, arg := range args {
+                // found match, truncate arguments and pass the rest to the next.
 				if strings.EqualFold(arg, subCmd.Name) {
 					c.args = cmdArgs[:i]
-					cc, err := subCmd.parse(cmdArgs[i+1:])
+					cc, err := subCmd.parse(cmdArgs[i+1:]) // exclude the sub command name.
 					if err != nil {
 						return nil, err
 					}
@@ -166,8 +166,12 @@ func (c *Command) parse(args []string) (*CallChain, error) {
 			}
 		}
 	}
+
+    c.args = cmdArgs
+    return &CallChain{c}, nil
 }
 
+// init checks if the command has all the provided fields set in order to run, it only runs once.
 func (c *Command) init() error {
 	if c.parsed {
 		return nil
