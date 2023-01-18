@@ -121,8 +121,9 @@ type Command struct {
 	Exec func(chain *CallChain, args []string) error
 
 	// computated at command runtime.
-	ctx  context.Context
-	args []string
+	ctx    context.Context
+	args   []string
+	parsed bool
 }
 
 // Context fetches the context from the command. If the context is nil, context.Background will
@@ -138,60 +139,60 @@ func (c *Command) Context() context.Context {
 // Parse parses a chain of commands returning a call chain and any error which occured during the
 // parsing.
 func (c *Command) parse(args []string) (*CallChain, error) {
-	cc := make([]*Command, 0)
-	ptr := c
-	for ptr != nil {
-		subCmd, err := ptr.parseNext(args)
-		if err != nil {
-			return nil, err
-		}
-		cc = append(cc, ptr)
-
-		ptr = subCmd
-		args = args[1:]
-	}
-
-	// inverse slice.
-	for i, j := 0, len(cc)-1; i < j; i, j = i+1, j-1 {
-		cc[i], cc[j] = cc[j], cc[i]
-	}
-
-	callChain := CallChain(cc)
-	return &callChain, nil
-}
-
-// parseNext parses the current command and returns the next command to be parsed.
-func (c *Command) parseNext(args []string) (*Command, error) {
-	if c.Name == "" {
-		return nil, ErrNoName
-	}
-
-	if c.FlagSet == nil {
-		c.FlagSet = flag.NewFlagSet(c.Name, flag.ExitOnError)
-	}
-
-	if c.HelpFunc == nil {
-		c.FlagSet.Usage = func() { fmt.Fprintln(c.FlagSet.Output(), DefaultHelp(c)) }
+	if err := c.init(); err != nil {
+		return nil, err
 	}
 
 	if err := c.FlagSet.Parse(args); err != nil {
 		return nil, err
 	}
 
-	if c.Exec == nil {
-		return nil, ErrNoExec{c.Name}
-	}
+	// search sub commands in command args.
+	cmdArgs := c.FlagSet.Args()
 
-	c.args = c.FlagSet.Args()
-	if len(c.args) > 0 {
+	if len(cmdArgs) > 0 {
 		for _, subCmd := range c.SubCommands {
-			if strings.EqualFold(c.args[0], subCmd.Name) {
-				return subCmd, nil
+			for i, arg := range args {
+				if strings.EqualFold(arg, subCmd.Name) {
+					c.args = cmdArgs[:i]
+					cc, err := subCmd.parse(cmdArgs[i+1:])
+					if err != nil {
+						return nil, err
+					}
+
+					*cc = append(*cc, c)
+					return cc, nil
+				}
 			}
 		}
 	}
+}
 
-	return nil, nil
+func (c *Command) init() error {
+	if c.parsed {
+		return nil
+	}
+
+	if c.Name == "" {
+		return ErrNoName
+	}
+
+	if c.Exec == nil {
+		return ErrNoExec{c.Name}
+	}
+
+	if c.FlagSet == nil { // provide flagset for help flag.
+		c.FlagSet = flag.NewFlagSet(c.Name, flag.ExitOnError)
+	}
+
+	if c.HelpFunc == nil {
+		c.HelpFunc = DefaultHelp
+	}
+
+	c.FlagSet.Usage = func() { fmt.Fprintln(c.FlagSet.Output(), c.HelpFunc(c)) }
+
+	c.parsed = true
+	return nil
 }
 
 // ParseAndRun is a helper function which parses the command along side with all its sub
@@ -208,8 +209,4 @@ func (c *Command) parseAndRun(ctx context.Context, args []string) error {
 // TODO: implement
 func DefaultHelp(c *Command) string {
 	return ""
-}
-
-func parseRawCmd(cmd []string) (string, []string, error) {
-	return cmd[0], cmd[1:], nil
 }
