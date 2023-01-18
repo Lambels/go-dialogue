@@ -9,6 +9,9 @@ import (
 	"sync"
 )
 
+// ErrDialogueClosed is returned by Open() indicating a closed dialogue.
+var ErrDialogueClosed = errors.New("dialogue: dialogue closed")
+
 // Dialogue describes a back and forth discussion between the provided reader and writer.
 type Dialogue struct {
 	// Prefix is an optional but recommended field which gets outputed before every read from R.
@@ -51,7 +54,7 @@ type Dialogue struct {
 
 // Open initialises the dialogue and listens for tokens (provided by the default bufio.Scanner) and maps them to commands.
 //
-// Open always returns non nil errors. After a call to Shutdown or Close the returned error is context.Canceled.
+// Open always returns non nil errors. After a call to Shutdown or Close the returned error is ErrDialogueClosed.
 //
 // IMPORTANT:
 //
@@ -68,7 +71,7 @@ func (d *Dialogue) Open() error {
 		// catch the close signal from the Shutdown call.
 		select {
 		case <-d.close:
-			return d.ctx.Err()
+            return ErrDialogueClosed
 		default:
 		}
 
@@ -100,7 +103,7 @@ func (d *Dialogue) Open() error {
 func (d *Dialogue) exit(err error) error {
 	select {
 	case <-d.close:
-		return d.ctx.Err()
+        return ErrDialogueClosed
 	default:
 	}
 
@@ -118,7 +121,7 @@ func (d *Dialogue) initLocked() {
 	}
 
 	if d.close == nil {
-		d.close = make(chan struct{}, 1)
+		d.close = make(chan struct{})
 	}
 
 	if d.pr == nil {
@@ -170,8 +173,10 @@ func (d *Dialogue) Close() error {
 		return nil
 	}
 
-	<-d.sendCloseNotify()
+    notify := d.sendCloseNotify()
+
 	d.cancel()
+    <-notify
 	d.running = false
 	return nil
 }
