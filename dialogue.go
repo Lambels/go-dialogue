@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"flag"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -31,12 +33,24 @@ type Dialogue struct {
 	// If nil the default CommandNotFound will be used which will call FormatHelp.
 	CommandNotFound func(ctx context.Context, args []string) error
 
-	// FormatHelp formats the help message for all the current commands. If left nil the default help formater will be used.
+	// HelpCmd creates a wrapper around FormatHelp to access the helper functions of commands via a command with the name
+	// HelpCmd. The command doesnt require any more over head then the command name, everything else is handeled by default.
 	//
-	//TODO: Implement default command and format handler.
-	//TODO: Have specfic keywords for help.
-	//TODO: Have a flag set to parse help fields or pass that to the commands?
-	FormatHelp func([]*Command) string
+	// The structure is
+	//
+	// <HelpCmd> [-n command-name]
+	//
+	// Where the -n flag value gets forwarded as the argument to the FormatHelp method.
+	HelpCmd string
+
+	// FormatHelp formats the help prompt for the command: cmd. It is called always with a command name: cmd (not guaranteed to be valid)
+	// and all the currently accessible commands: cmds (command-name: command).
+	//
+	// FormatHelp is called by either the default CommandNotFound handler with cmd = "" ("" indicates that we want all the commands'
+	// help prompt to be included in the output).
+	//
+	// Or by the HelpCmd with cmd = flag provided in the call to HelpCmd.
+	FormatHelp func(cmd string, cmds map[string]*Command) string
 
 	// CommandContext optinally specifies a function to set the context for a command. The provided context is derived from the
 	// base context and its up to the implementation of the function to wrap or not the returned context with the base context
@@ -71,7 +85,7 @@ func (d *Dialogue) Open() error {
 		// catch the close signal from the Shutdown call.
 		select {
 		case <-d.close:
-            return ErrDialogueClosed
+			return ErrDialogueClosed
 		default:
 		}
 
@@ -103,7 +117,7 @@ func (d *Dialogue) Open() error {
 func (d *Dialogue) exit(err error) error {
 	select {
 	case <-d.close:
-        return ErrDialogueClosed
+		return ErrDialogueClosed
 	default:
 	}
 
@@ -112,32 +126,6 @@ func (d *Dialogue) exit(err error) error {
 	d.mu.Unlock()
 
 	return err
-}
-
-func (d *Dialogue) initLocked() {
-	// check if context doesnt exist or previous context expired (this means the dialogue is being reused).
-	if d.ctx == nil || d.ctx.Err() != nil {
-		d.ctx, d.cancel = context.WithCancel(context.Background())
-	}
-
-	if d.close == nil {
-		d.close = make(chan struct{})
-	}
-
-	if d.pr == nil {
-		d.pr = NewPreamptiveReader(d.ctx, d.R)
-	}
-}
-
-func (d *Dialogue) sendCloseNotify() <-chan struct{} {
-	notify := make(chan struct{}, 1)
-
-	go func() {
-		d.close <- struct{}{}
-		notify <- struct{}{}
-	}()
-
-	return notify
 }
 
 // dispatchHandler dispatches the handler for cmd if it exits or the not found handler.
@@ -161,7 +149,84 @@ func (d *Dialogue) dispatchHandler(cmd string, args []string) error {
 		}
 	}
 
-	return command.parseAndRun(cmdCtx, args)
+	callChain, err := command.parse(args)
+	// error returned because flag set uses continue on error, dont report error back to the dispatcher to "continue on error".
+	if err != nil {
+		return nil
+	}
+
+	defer callChain.clean()
+	return callChain.AdvanceExec(0, cmdCtx) // start call chain.
+}
+
+func (d *Dialogue) initLocked() error {
+	if len(d.commands) == 0 {
+		return errors.New("dialogue: no commands")
+	}
+
+	if err := d.initCommandsLocked(); err != nil {
+		return err
+	}
+
+	// check if context doesnt exist or previous context expired (this means the dialogue is being reused).
+	if d.ctx == nil || d.ctx.Err() != nil {
+		d.ctx, d.cancel = context.WithCancel(context.Background())
+	}
+
+	if d.close == nil {
+		d.close = make(chan struct{})
+	}
+
+	if d.pr == nil {
+		d.pr = NewPreamptiveReader(d.ctx, d.R)
+	}
+
+	if d.FormatHelp == nil {
+		d.FormatHelp = defaultHelpFormater
+	}
+
+	if d.CommandNotFound == nil {
+		d.CommandNotFound = d.defaultCmdNotFound
+	}
+
+	// set the help command.
+	if d.HelpCmd != "" {
+		fs := flag.NewFlagSet(d.HelpCmd, flag.ExitOnError)
+		nParam := flag.String("n", "", "specifies the command name you want help on")
+
+		d.commands[d.HelpCmd] = &Command{
+			Name:      d.HelpCmd,
+			Structure: fmt.Sprintf("<%v> [-n <command-name>]", d.HelpCmd),
+			FlagSet:   fs,
+			Exec: func(_ *CallChain, _ []string) error {
+				_, err := fmt.Fprintf(d.W, d.FormatHelp(*nParam, d.commands))
+				return err
+			},
+		}
+	}
+
+	return nil
+}
+
+func (d *Dialogue) initCommandsLocked() error {
+	for _, cmd := range d.commands {
+		if err := cmd.init(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (d *Dialogue) sendCloseNotify() <-chan struct{} {
+	notify := make(chan struct{}, 1)
+
+	go func() {
+		d.close <- struct{}{}
+		notify <- struct{}{}
+	}()
+
+	return notify
 }
 
 // Close imidiately cancels the base context and always returns nil.
@@ -173,10 +238,10 @@ func (d *Dialogue) Close() error {
 		return nil
 	}
 
-    notify := d.sendCloseNotify()
+	notify := d.sendCloseNotify()
 
 	d.cancel()
-    <-notify
+	<-notify
 	d.running = false
 	return nil
 }
@@ -242,4 +307,42 @@ func (d *Dialogue) PreamptiveReader() *PreamptiveReader {
 	}
 
 	return d.pr
+}
+
+// Visit visits all the commands available in the dialogue.
+func (d *Dialogue) Visit(fn func(*Command)) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	for _, cmd := range d.commands {
+		fn(cmd)
+	}
+}
+
+func (d *Dialogue) defaultCmdNotFound(_ context.Context, args []string) error {
+	fmt.Fprintf(d.W, "Command: %v not found\n", args[0])
+
+	fmt.Fprintln(d.W, d.FormatHelp("", d.commands))
+
+	return nil
+}
+
+func defaultHelpFormater(cmd string, cmds map[string]*Command) (out string) {
+	if cmd == "" { // format all commands if no cmd name provided.
+		var b strings.Builder
+		for _, cmd := range cmds {
+			b.WriteString(cmd.FormatHelp(cmd, false))
+		}
+
+		out = b.String()
+	} else {
+		c, ok := cmds[cmd]
+		if !ok {
+			return "command not found"
+		}
+
+		out = c.FormatHelp(c, true)
+	}
+
+	return out
 }
