@@ -5,7 +5,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"strings"
+	"text/tabwriter"
 )
 
 // ErrNoExec is returned when a command in a call chain has no exec function therefor cant
@@ -21,7 +23,7 @@ func (e ErrNoExec) Error() string {
 // ErrNoName identifies a command with no name.
 var ErrNoName = errors.New("dialogue: command has no name")
 
-// CallChain represents a linked list inside the command tree which is a path of execution.
+// CallChain represents a linked list pathed through the command tree following a path of execution.
 //
 // It starts inverted, the last command in the tree will be the first in the call chain.
 type CallChain []*Command
@@ -75,6 +77,15 @@ func (c *CallChain) GetCurrent() *Command {
 	return (*c)[0]
 }
 
+// clean sets all used flags in the call chain back to their default values.
+func (c *CallChain) clean() {
+	for _, cmd := range *c {
+		cmd.FlagSet.Visit(func(f *flag.Flag) {
+			f.Value.Set(f.DefValue)
+		})
+	}
+}
+
 // Command represents a parsable, executable and chainable instruction from the command line.
 // It stores a flagset used to parse command line arguments, an exec function which is called
 // upon execution, other commands in the form of sub commands which allows tree like branching and
@@ -103,7 +114,10 @@ type Command struct {
 	// The function is invoced by the -h or --help flag under the recieved command object. The HelpFunc
 	// should be capable of consuming the Name, Structure, HelpLong, HelpShort, FlagSet and SubCommands
 	// fields to generate a thorough output.
-	HelpFunc func(*Command) string
+	//
+	// focus = true indicates that the FormatHelp call was called for this command specifically, if focus = false then
+	// the FormatHelp call was called in a batch with other calls and shouldnt be very specific.
+	FormatHelp func(cmd *Command, focus bool) string
 
 	// SubCommands holds the sub commands accessible from the root command. This structure allows
 	// commands to branch out like a tree.
@@ -121,9 +135,8 @@ type Command struct {
 	Exec func(chain *CallChain, args []string) error
 
 	// computated at command runtime.
-	ctx    context.Context
-	args   []string
-	parsed bool
+	ctx  context.Context
+	args []string
 }
 
 // Context fetches the context from the command. If the context is nil, context.Background will
@@ -138,21 +151,17 @@ func (c *Command) Context() context.Context {
 
 // parse the command trees recursively building the command chain.
 func (c *Command) parse(args []string) (*CallChain, error) {
-	if err := c.init(); err != nil {
-		return nil, err
-	}
-
 	if err := c.FlagSet.Parse(args); err != nil {
 		return nil, err
 	}
 
 	cmdArgs := c.FlagSet.Args()
 
-    // search sub commands in command args.
+	// search sub commands in command args.
 	if len(cmdArgs) > 0 {
 		for _, subCmd := range c.SubCommands {
 			for i, arg := range args {
-                // found match, truncate arguments and pass the rest to the next.
+				// found match, truncate arguments and pass the rest to the next.
 				if strings.EqualFold(arg, subCmd.Name) {
 					c.args = cmdArgs[:i]
 					cc, err := subCmd.parse(cmdArgs[i+1:]) // exclude the sub command name.
@@ -167,16 +176,14 @@ func (c *Command) parse(args []string) (*CallChain, error) {
 		}
 	}
 
-    c.args = cmdArgs
-    return &CallChain{c}, nil
+	// BASE CASE:
+	// Exhausted all arguments and found no matches to any sub commands, return the current command.
+	c.args = cmdArgs
+	return &CallChain{c}, nil
 }
 
-// init checks if the command has all the provided fields set in order to run, it only runs once.
+// init checks if the command has all the provided fields set in order to run, it only runs on dialogue startup.
 func (c *Command) init() error {
-	if c.parsed {
-		return nil
-	}
-
 	if c.Name == "" {
 		return ErrNoName
 	}
@@ -189,28 +196,86 @@ func (c *Command) init() error {
 		c.FlagSet = flag.NewFlagSet(c.Name, flag.ExitOnError)
 	}
 
-	if c.HelpFunc == nil {
-		c.HelpFunc = DefaultHelp
+	if c.FormatHelp == nil {
+		c.FormatHelp = defaultCommandHelpFormater
 	}
 
-	c.FlagSet.Usage = func() { fmt.Fprintln(c.FlagSet.Output(), c.HelpFunc(c)) }
+	c.FlagSet.Usage = func() { fmt.Fprintln(c.FlagSet.Output(), c.FormatHelp(c, true)) }
 
-	c.parsed = true
 	return nil
 }
 
-// ParseAndRun is a helper function which parses the command along side with all its sub
-// commands and runs the first command in the chain.
-func (c *Command) parseAndRun(ctx context.Context, args []string) error {
-	chain, err := c.parse(args)
-	if err != nil {
-		return err
+// defaultCommandHelpFormater is used as the default FormatHelp handler.
+func defaultCommandHelpFormater(c *Command, focus bool) string {
+	var b strings.Builder
+
+	// c out of focus, return the short help.
+	if !focus {
+		buildHelpShort(&b, c)
+		return b.String()
 	}
 
-	return chain.AdvanceExec(0, ctx)
+	if c.Structure != "" {
+		b.WriteString(c.Structure)
+	} else {
+		b.WriteString(c.Name)
+	}
+
+	b.WriteString("\n\n")
+
+	if c.HelpLong != "" {
+		b.WriteString(c.HelpLong)
+		b.WriteString("\n\n")
+	}
+
+	tw := tabwriter.NewWriter(&b, 0, 2, 2, ' ', 0)
+
+	// format flags:
+	if nFlags(c.FlagSet) > 0 {
+		b.WriteString("FLAGS\n")
+		c.FlagSet.VisitAll(func(f *flag.Flag) {
+			defV := f.DefValue
+			var space string
+			if defV != "" {
+				space = "="
+			}
+
+			fmt.Fprintf(tw, "-%s%s%s\t%s\n", f.Name, space, defV, f.Usage)
+		})
+
+		tw.Flush()
+		b.WriteByte('\n')
+	}
+
+	// format sub commands:
+	if len(c.SubCommands) > 0 {
+		b.WriteString("SUBCOMMANDS\n")
+
+		for _, sCmd := range c.SubCommands {
+			buildHelpShort(tw, sCmd)
+		}
+
+		tw.Flush()
+		b.WriteByte('\n')
+	}
+
+	return strings.TrimSpace(b.String()) + "\n"
 }
 
-// TODO: implement
-func DefaultHelp(c *Command) string {
-	return ""
+func nFlags(fs *flag.FlagSet) (n int) {
+	fs.VisitAll(func(f *flag.Flag) { n++ })
+	return n
+}
+
+// buildHelpShort builds the out of focus / short version of the help text.
+//
+// It prefers the command structure over the command name.
+func buildHelpShort(w io.Writer, c *Command) {
+	name := c.Name
+
+	if c.Structure != "" {
+		name = c.Structure
+	}
+
+	fmt.Fprintf(w, "%s\t%s\n", name, c.HelpShort)
 }
