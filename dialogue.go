@@ -164,6 +164,22 @@ func (d *Dialogue) initLocked() error {
 		return errors.New("dialogue: no commands")
 	}
 
+    // set the help command.
+    if d.HelpCmd != "" {
+        fs := flag.NewFlagSet(d.HelpCmd, flag.ExitOnError)
+        nParam := fs.String("n", "", "specifies the command name you want help on")
+
+        d.commands[d.HelpCmd] = &Command{
+            Name:      d.HelpCmd,
+            Structure: fmt.Sprintf("<%v> [-n <command-name>]", d.HelpCmd),
+            FlagSet:   fs,
+            Exec: func(_ *CallChain, _ []string) error {
+                _, err := fmt.Fprintf(d.W, d.FormatHelp(*nParam, d.commands))
+                return err
+            },
+        }
+    }
+
 	if err := d.initCommandsLocked(); err != nil {
 		return err
 	}
@@ -189,21 +205,6 @@ func (d *Dialogue) initLocked() error {
 		d.CommandNotFound = d.defaultCmdNotFound
 	}
 
-	// set the help command.
-	if d.HelpCmd != "" {
-		fs := flag.NewFlagSet(d.HelpCmd, flag.ExitOnError)
-		nParam := flag.String("n", "", "specifies the command name you want help on")
-
-		d.commands[d.HelpCmd] = &Command{
-			Name:      d.HelpCmd,
-			Structure: fmt.Sprintf("<%v> [-n <command-name>]", d.HelpCmd),
-			FlagSet:   fs,
-			Exec: func(_ *CallChain, _ []string) error {
-				_, err := fmt.Fprintf(d.W, d.FormatHelp(*nParam, d.commands))
-				return err
-			},
-		}
-	}
 
 	return nil
 }
@@ -338,7 +339,7 @@ func defaultHelpFormater(cmd string, cmds map[string]*Command) (out string) {
 	} else {
 		c, ok := cmds[cmd]
 		if !ok {
-			return "command not found"
+			return "command not found\n"
 		}
 
 		out = c.FormatHelp(c, true)
