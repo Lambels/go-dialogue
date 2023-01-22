@@ -9,6 +9,7 @@ Create simple, configurable and chainable dialogue cli tool similar to the `psql
     - `*flag.FlagSet`
 - Simple and configurable.
 - Intuituve.
+- Minimalist api footprint. (exports only 4 types)
 
 ### go get it!
 ```
@@ -197,5 +198,114 @@ func main() {
     log.Fatal(d.Open())
 ```
 The behaviour of the `Shutdown()` method is the following:
-1. It waits for at most the current transaction to occur then exits.
+1. It waits for at most the current transaction to finish then exits.
 2. If the context gets cancelled before the current transaction exits, the dialogue exits before the current transaction completes.
+
+## Chaining commands (CallChain):
+A core functionality of the go-dialogue tool is the capability of chaining commands.
+Similarly to many other go cli building packages, you can build a command tree, in go-dialogue you do this in the following way:
+```go
+cmd1 := &dialogue.Command{
+    Name: "cmd1",
+}
+cmd2 := &dialogue.Command{
+    Name: "cmd2",
+}
+cmd3 := &dialogue.Command{
+    Name: "cmd3",
+}
+cmd4 := &dialogue.Command{
+    Name: "cmd2",
+}
+
+cmd1.Subcommands = []*dialogue.Command{
+    cmd2,
+    cmd3,
+}
+
+cmd3.SubCommands = []*dialogue.Command{
+    cmd4,
+}
+```
+This is how our command tree currently looks like:
+
+![tree_diagram](tree1.svg)
+
+Now lets register some of the commands to make them accessible via the dialogue cli.
+```go
+d.RegisterCommands(
+    cmd1,
+    cmd3,
+)
+```
+Now this is how our tree will look like:
+
+![tree_diagram](tree2.svg)
+
+I have highlighted in hot pink the commands which are directly accessible, all of the 4 commands are accessible but cmd1 and cmd3
+are directly accessible as root commands, cmd2 and cmd4 are only accessible via chaining. Lets take a look at a few commands:
+
+```
+> cmd1 --cmd1_flag foo arg1 arg2 cmd2 --cmd2_flag bar arg1 arg2
+```
+Now the command path / `*dialogue.CallChain` will look like this:
+`cmd1 -> cmd2`.
+
+Lets look at another example:
+```
+> cmd1 arg cmd3 --flag foo cmd4 arg1 arg2
+```
+The CallChain will look like this:
+`cmd1 -> cmd3 -> cmd4`.
+
+Now lets look at some code examples:
+
+You will notice that programatically the call chains are stored inversly and called inversly.
+`cmd1 -> cmd3 -> cmd4` will result in `cmd4 -> cmd3 -> cmd1` to give a sense of building towars the root command.
+```go
+// Current command we are parsing: cmd1 arg cmd3 cmd4 arg1 arg2
+// The call chain will look like: cmd4 -> cmd3 -> cmd1
+
+type valCtxKey struct{}
+
+func execHandlerCmd4(cc *dialogue.CallChain, args []string) error {
+    // we know that there will always be a command attached to the call chain of cmd4 since it is only exposed as a chained
+    // command and cant be accessed as a root command. (cmd4 isnt hot pink in the graph above).
+    
+    // just log the provided args and call the next command in chain (cmd3).
+    log.Println(args) // [arg1 arg2].
+
+    // this call advances the call chain to the next command in the chain and executes the command. It sets the context 
+    // of the next command to its context (which is the dialogues base context).
+    return cc.AdvanceExec(1, cc.GetCurrent().Context())
+}
+
+func execHandlerCmd3(cc *dialogue.CallChain, args []string) error {
+    // if you look back at the tree, you will see that this command is hot pinc / a root command. We need to check if cmd3
+    // was called as a root command or as part of a longer chain.
+    nextCmd := cc.Next(nil)
+
+    if nextCmd == nil { // we are at the root command.
+        log.Println(args) // just log the args.
+        return nil
+    }
+
+    // we are just part of a chain, add a value to the context.
+    ctx := cc.GetCurrent().Context()
+
+    ctx = context.WithValue(ctx, valCtxKey{}, "value_from_cmd3")
+    return cc.AdvanceExec(1, ctx)
+}
+
+func execHandlerCmd1(cc *dialogue.CallChain, args []string) error {
+    // we know that cmd1 being the root command cant advance the call chain, you can check this programatically via the Next() method.
+    nextCmd := cc.Next(nil)
+    // nextCmd will always be nil.
+    log.Println(nextCmd) // nil.
+    
+    ctx := cc.GetCurrent().Context()
+    log.Println(ctx.Value(valCtxKey{})) // value_from_cmd3.
+    log.Println(args) // [arg].
+    return nil
+}
+```
