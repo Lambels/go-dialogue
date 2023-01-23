@@ -164,21 +164,21 @@ func (d *Dialogue) initLocked() error {
 		return errors.New("dialogue: no commands")
 	}
 
-    // set the help command.
-    if d.HelpCmd != "" {
-        fs := flag.NewFlagSet(d.HelpCmd, flag.ExitOnError)
-        nParam := fs.String("n", "", "specifies the command name you want help on")
+	// set the help command.
+	if d.HelpCmd != "" {
+		fs := flag.NewFlagSet(d.HelpCmd, flag.ExitOnError)
+		nParam := fs.String("n", "", "specifies the command name you want help on")
 
-        d.commands[d.HelpCmd] = &Command{
-            Name:      d.HelpCmd,
-            Structure: fmt.Sprintf("<%v> [-n <command-name>]", d.HelpCmd),
-            FlagSet:   fs,
-            Exec: func(_ *CallChain, _ []string) error {
-                _, err := fmt.Fprintf(d.W, d.FormatHelp(*nParam, d.commands))
-                return err
-            },
-        }
-    }
+		d.commands[d.HelpCmd] = &Command{
+			Name:      d.HelpCmd,
+			Structure: fmt.Sprintf("<%v> [-n <command-name>]", d.HelpCmd),
+			FlagSet:   fs,
+			Exec: func(_ *CallChain, _ []string) error {
+				_, err := fmt.Fprintf(d.W, d.FormatHelp(*nParam, d.commands))
+				return err
+			},
+		}
+	}
 
 	if err := d.initCommandsLocked(); err != nil {
 		return err
@@ -187,6 +187,12 @@ func (d *Dialogue) initLocked() error {
 	// check if context doesnt exist or previous context expired (this means the dialogue is being reused).
 	if d.ctx == nil || d.ctx.Err() != nil {
 		d.ctx, d.cancel = context.WithCancel(context.Background())
+
+		// if there is an existing preamptive reader, continue using it with the new context since it may still have
+		// state.
+		if d.pr != nil {
+			d.pr.ctx = d.ctx
+		}
 	}
 
 	if d.close == nil {
@@ -204,7 +210,6 @@ func (d *Dialogue) initLocked() error {
 	if d.CommandNotFound == nil {
 		d.CommandNotFound = d.defaultCmdNotFound
 	}
-
 
 	return nil
 }
@@ -260,9 +265,11 @@ func (d *Dialogue) Shutdown(ctx context.Context) error {
 	}
 
 	notify := d.sendCloseNotify()
+	d.running = false
 
 	select {
 	case <-notify:
+		d.cancel() // cancel context to signal to the subsequent preamptive reads.
 		return nil
 	case <-ctx.Done():
 		d.cancel()
