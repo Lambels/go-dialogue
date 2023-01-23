@@ -2,13 +2,13 @@ package main
 
 import (
 	"context"
+	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"strings"
 	"time"
-    "flag"
-    "fmt"
 
 	"github.com/Lambels/go-dialogue"
 )
@@ -53,7 +53,7 @@ func main() {
 
 	go func() {
 		<-c
-        log.Println()
+		log.Println()
 		log.Println("gracefully shutting down dialogue with a 5 second timeout...")
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
