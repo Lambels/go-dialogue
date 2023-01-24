@@ -1,4 +1,4 @@
-package dialogue_test
+package dialogue
 
 import (
 	"bytes"
@@ -8,17 +8,15 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/Lambels/go-dialogue"
 )
 
 func TestShutdownWaitCurrentTransaction(t *testing.T) {
 	t.Parallel()
 
 	msg := "transaction complete"
-	w := NewWriteExpected(t, []byte(msg))
+	w := newWriteExpected(t, []byte(msg))
 
-	d := &dialogue.Dialogue{
+	d := &Dialogue{
 		R: stallingReader{
 			r: strings.NewReader("idk what im typing here\n"),
 			d: 5 * time.Second,
@@ -40,11 +38,11 @@ func TestShutdownWaitCurrentTransaction(t *testing.T) {
 	case err := <-closed:
 		timeElapsed := time.Now().Sub(timeStart)
 		if timeElapsed < 4*time.Second {
-			t.Fatal("expected dialogue to close after 4 seconds")
+			t.Fatal("expected to close after 4 seconds")
 		}
 
-		if err != dialogue.ErrDialogueClosed {
-			t.Fatalf("expected error to be %v but got %v", dialogue.ErrDialogueClosed, err)
+		if err != ErrDialogueClosed {
+			t.Fatalf("expected error to be %v but got %v", ErrDialogueClosed, err)
 		}
 
 		// get the underlaying reader to check if there was only one call to read.
@@ -53,7 +51,7 @@ func TestShutdownWaitCurrentTransaction(t *testing.T) {
 			t.Fatal("expected only one call to read")
 		}
 	case <-time.After(6 * time.Second):
-		t.Fatal("expected dialogue to close before 6 seconds")
+		t.Fatal("expected to close before 6 seconds")
 	}
 }
 
@@ -62,7 +60,7 @@ func TestShutdownDeadline(t *testing.T) {
 
 	msg := []byte("I hate unit tests")
 
-	d := &dialogue.Dialogue{
+	d := &Dialogue{
 		R: stallingReader{
 			r: bytes.NewReader(msg),
 			d: 5 * time.Second,
@@ -84,8 +82,8 @@ func TestShutdownDeadline(t *testing.T) {
 
 	select {
 	case err := <-closed:
-		if err != dialogue.ErrDialogueClosed {
-			t.Fatalf("expected error to be %v but got %v", dialogue.ErrDialogueClosed, err)
+		if err != ErrDialogueClosed {
+			t.Fatalf("expected error to be %v but got %v", ErrDialogueClosed, err)
 		}
 
 		// take over the failed read to confirm it happened.
@@ -101,39 +99,74 @@ func TestShutdownDeadline(t *testing.T) {
 			t.Fatalf("got unexpected read: %s != %s", buf, msg)
 		}
 	case <-time.After(4 * time.Second):
-		t.Fatal("expected dialogue to close before 4 seconds")
+		t.Fatal("expected to close before 4 seconds")
 	}
 }
 
 func TestHelpCommand(t *testing.T) {
 	t.Run("focus", func(t *testing.T) {
 		// expect the output to be the focused format of the command.
-		w := NewWriteExpected(t, []byte(testCommand.FormatHelp(
+		w := newWriteExpected(t, []byte(testCommand.FormatHelp(
 			testCommand,
 			true,
 		)))
 
-		d := &dialogue.Dialogue{
-			R:       strings.NewReader("help -n test\n"),
+		d := &Dialogue{
+			R:       strings.NewReader("help -n test\nquit\n"),
 			W:       w,
 			HelpCmd: "help",
+			QuitCmd: "quit",
+		}
+		d.RegisterCommands(testCommand)
+
+		if err := d.Open(); err != ErrDialogueClosed {
+			t.Fatalf("got unexpected error: %v", err)
 		}
 
-		d.Open()
+		if err := w.Flush(); err != nil {
+			t.Fatal(err)
+		}
 	})
 
 	t.Run("generic", func(t *testing.T) {
+		d := &Dialogue{
+			R:       strings.NewReader("help\nquit\n"),
+			HelpCmd: "help",
+			QuitCmd: "quit",
+		}
+		d.RegisterCommands(testCommand)
+
+		// initialise commands to access the FormatHelp methods.
+		d.initCommandsLocked()
+
+		var expected string
+		d.Visit(func(c *Command) {
+			expected += c.FormatHelp(c, false)
+		})
+		w := newWriteExpected(t, []byte(expected))
+		d.W = w
+
+		if err := d.Open(); err != ErrDialogueClosed {
+			t.Fatalf("recieved unexpected err: %v", err)
+		}
+
+		if err := w.Flush(); err != nil {
+			t.Fatal(err)
+		}
 	})
 }
 
 func TestDefaultCommandNotFound(t *testing.T) {
 }
 
+func TestDefaultCommandQuit(t *testing.T) {
+}
+
 func TestReadAfterClose(t *testing.T) {
 
 }
 
-func notifyClose(d *dialogue.Dialogue) <-chan error {
+func notifyClose(d *Dialogue) <-chan error {
 	errC := make(chan error, 1)
 
 	go func() {
@@ -160,7 +193,7 @@ type writeExpected struct {
 	t        *testing.T
 }
 
-func NewWriteExpected(t *testing.T, buf []byte) *writeExpected {
+func newWriteExpected(t *testing.T, buf []byte) *writeExpected {
 	return &writeExpected{
 		expected: buf,
 		t:        t,
@@ -189,4 +222,14 @@ func (w *writeExpected) Write(p []byte) (int, error) {
 
 	w.wX += wn
 	return wn, nil
+}
+
+func (w *writeExpected) Flush() error {
+	if w.wX != len(w.expected) {
+		err := fmt.Errorf("writeExpected: there are still bytes to be written")
+		w.t.Error(err.Error())
+		return err
+	}
+
+	return nil
 }
