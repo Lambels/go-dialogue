@@ -62,10 +62,10 @@ type Dialogue struct {
 	// register you own *dialogue.Command which quits the dialogue however you want.
 	QuitCmd string
 
-    // FormatHelp is an optional field called by the default implementations of HelpCmd and CommandNotFound.
-    //
-    // There is no guarantee that the provided command name is in the commands map but its always guaranteed that the cmds map
-    // will consist of the current available commands in the dialogue.
+	// FormatHelp is an optional field called by the default implementations of HelpCmd and CommandNotFound.
+	//
+	// There is no guarantee that the provided command name is in the commands map but its always guaranteed that the cmds map
+	// will consist of the current available commands in the dialogue.
 	FormatHelp func(cmd string, cmds map[string]*Command) string
 
 	// CommandContext optinally specifies a function to set the context for a command. The provided context is derived from the
@@ -142,8 +142,10 @@ func (d *Dialogue) exit(err error) error {
 	default:
 	}
 
-	d.cancel() // cancel context to propagate the closing signal to the preamptive reader.
-	d.running = false
+	if err != nil {
+		d.cancel() // cancel context to propagate the closing signal to the preamptive reader.
+		d.running = false
+	}
 
 	return err
 }
