@@ -24,7 +24,8 @@ type Dialogue struct {
 	// are cancellable by the base context.
 	R io.Reader
 
-	// W is the destination where the Prefix is written.
+	// W is the destination of the "conversation", it is used by all the default implementations as the destination of messages
+	// which include: the default CommandNotFound and HelpCmd implementations.
 	W io.Writer
 
 	// CommandNotFound handels commands which arent mapped to anything. The ctx is the base context and the args are the full
@@ -33,28 +34,43 @@ type Dialogue struct {
 	// If nil the default CommandNotFound will be used which will call FormatHelp.
 	CommandNotFound func(ctx context.Context, args []string) error
 
-	// HelpCmd creates a wrapper around FormatHelp to access the helper functions of commands via a command with the name
-	// HelpCmd. The command doesnt require any more over head then the command name, everything else is handeled by default.
+	// HelpCmd is an optional field, it creates a help command for you which doesent require any more over head then providing the
+	// command name, everything else is handeled by default.
 	//
-	// The structure is
+	// The implementation of the help command takes the following structure:
 	//
 	// <HelpCmd> [-n command-name]
 	//
-	// Where the -n flag value gets forwarded as the argument to the FormatHelp method.
+	// The implementation takes advantage of the FormatHelp field and wraps around it, calling it:
+	//
+	// 1. When -n flag is provided:
+	//
+	// FormatHelp(valueFromNFlag, cmds)
+	//
+	// 2. When -n isnt provided:
+	//
+	// FormatHelp("", cmds)
+	//
+	// Again HelpCmd is optional and if the default implementation doesnt suit your needs, feel free to register your own implementation
+	// of a help command using your own *dialogue.Command.
 	HelpCmd string
 
-	// FormatHelp formats the help prompt for the command: cmd. It is called always with a command name: cmd (not guaranteed to be valid)
-	// and all the currently accessible commands: cmds (command-name: command).
+	// QuitCmd is an optional field, it creates a quit command for you and registers it to the dialogue. It exits the dialogue with
+	// the ErrDialogueClosed error.
 	//
-	// FormatHelp is called by either the default CommandNotFound handler with cmd = "" ("" indicates that we want all the commands'
-	// help prompt to be included in the output).
-	//
-	// Or by the HelpCmd with cmd = flag provided in the call to HelpCmd.
+	// Again QuitCmd is optional and is intended to save you boilerplate code, if you are looking for a more customisable quit command
+	// register you own *dialogue.Command which quits the dialogue however you want.
+	QuitCmd string
+
+    // FormatHelp is an optional field called by the default implementations of HelpCmd and CommandNotFound.
+    //
+    // There is no guarantee that the provided command name is in the commands map but its always guaranteed that the cmds map
+    // will consist of the current available commands in the dialogue.
 	FormatHelp func(cmd string, cmds map[string]*Command) string
 
 	// CommandContext optinally specifies a function to set the context for a command. The provided context is derived from the
 	// base context and its up to the implementation of the function to wrap or not the returned context with the base context
-	// but if not done no cancelation can be provided to the command.
+	// but if not wrapped, no cancelation can be propagated to the command.
 	CommandContext func(context.Context, string) context.Context
 
 	mu       sync.Mutex          // protects the fields below.
@@ -63,7 +79,7 @@ type Dialogue struct {
 	pr       *PreamptiveReader   // pr is the wrapped preamptive reader. (it is wrapped around R)
 	commands map[string]*Command // commands is a mapping of the command name to command.
 	running  bool                // indicates if the current dialogue is running.
-	close    chan struct{}
+	close    chan chan struct{}  // used to send acknowledgement signals between the close calls and the processing go routine.
 }
 
 // Open initialises the dialogue and listens for tokens (provided by the default bufio.Scanner) and maps them to commands.
@@ -75,18 +91,15 @@ type Dialogue struct {
 // You can open previously closed dialogues but be aware of the underlaying preamptive reader since it will always be binded to
 // the initiall reader and may read messages from the past transaction.
 func (d *Dialogue) Open() error {
-	d.mu.Lock()
-	d.running = true
-	d.initLocked()
-	d.mu.Unlock()
+	if err := d.init(); err != nil {
+		return err
+	}
 
 	scanner := bufio.NewScanner(d.pr)
 	for {
-		// catch the close signal from the Shutdown call.
-		select {
-		case <-d.close:
-			return ErrDialogueClosed
-		default:
+		// acknowledge any close signals before commiting to a write call.
+		if err := d.exit(nil); err != nil {
+			return err
 		}
 
 		if _, err := d.W.Write([]byte(d.Prefix)); err != nil {
@@ -113,17 +126,24 @@ func (d *Dialogue) Open() error {
 	}
 }
 
-// exit catches any close attempts and returns the context error or returns the provided error.
+// exit locks the dialogue in closing state, it first tries to acknowledge any closing signals before returning the provided
+// error.
+//
+// If it acknowledges any exit errors it returns ErrDialogueClosed.
 func (d *Dialogue) exit(err error) error {
+	// acquire mutex to make sure there is no race condition between sending an acknowledgement and recieving it.
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
 	select {
-	case <-d.close:
+	case ack := <-d.close:
+		ack <- struct{}{} // acknowledge we are closing.
 		return ErrDialogueClosed
 	default:
 	}
 
-	d.mu.Lock()
+	d.cancel() // cancel context to propagate the closing signal to the preamptive reader.
 	d.running = false
-	d.mu.Unlock()
 
 	return err
 }
@@ -159,20 +179,41 @@ func (d *Dialogue) dispatchHandler(cmd string, args []string) error {
 	return callChain.AdvanceExec(0, cmdCtx) // start call chain.
 }
 
-func (d *Dialogue) initLocked() error {
+func (d *Dialogue) init() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
 	if len(d.commands) == 0 {
 		return errors.New("dialogue: no commands")
 	}
 
+	// set the quit command.
+	if _, ok := d.commands[d.QuitCmd]; d.QuitCmd != "" && !ok {
+		d.commands[d.QuitCmd] = &Command{
+			Name:      d.QuitCmd,
+			HelpShort: "quits the dialogue abruptly",
+			Exec: func(_ *CallChain, _ []string) error {
+				// no point in setting running state to false in here to prevent other calls to Shutdown or Close since in the end
+				// they all play into the same side effects: ErrDialogueClosed returned from Open(), context cancelled and running
+				// state set to false safely.
+				return ErrDialogueClosed
+			},
+		}
+	}
+
 	// set the help command.
-	if d.HelpCmd != "" {
+	if _, ok := d.commands[d.HelpCmd]; d.HelpCmd != "" && !ok {
 		fs := flag.NewFlagSet(d.HelpCmd, flag.ExitOnError)
 		nParam := fs.String("n", "", "specifies the command name you want help on")
 
 		d.commands[d.HelpCmd] = &Command{
 			Name:      d.HelpCmd,
-			Structure: fmt.Sprintf("<%v> [-n <command-name>]", d.HelpCmd),
-			FlagSet:   fs,
+			Structure: fmt.Sprintf("%v [-n <command-name>]", d.HelpCmd),
+			HelpShort: "outputs the help prompt for all commands or a specified command via the -n flag",
+			HelpLong: `help formats a short version of help prompts for all available commands when ran without the -n flag,
+optinally you can provide the -n flag to get a more thorough help prompt for a specific command indicated by the name passed after
+the -n flag.`,
+			FlagSet: fs,
 			Exec: func(_ *CallChain, _ []string) error {
 				_, err := fmt.Fprintf(d.W, d.FormatHelp(*nParam, d.commands))
 				return err
@@ -196,7 +237,7 @@ func (d *Dialogue) initLocked() error {
 	}
 
 	if d.close == nil {
-		d.close = make(chan struct{})
+		d.close = make(chan chan struct{}, 1)
 	}
 
 	if d.pr == nil {
@@ -211,6 +252,7 @@ func (d *Dialogue) initLocked() error {
 		d.CommandNotFound = d.defaultCmdNotFound
 	}
 
+	d.running = true
 	return nil
 }
 
@@ -224,31 +266,27 @@ func (d *Dialogue) initCommandsLocked() error {
 	return nil
 }
 
-func (d *Dialogue) sendCloseNotify() <-chan struct{} {
-	notify := make(chan struct{}, 1)
+func (d *Dialogue) signalClosingLocked() <-chan struct{} {
+	d.running = false
+	ackChan := make(chan struct{}) // unbuffered to provide acknowledgement synchronisation.
 
-	go func() {
-		d.close <- struct{}{}
-		notify <- struct{}{}
-	}()
-
-	return notify
+	// signal close.
+	d.close <- ackChan
+	return ackChan
 }
 
 // Close imidiately cancels the base context and always returns nil.
 func (d *Dialogue) Close() error {
 	d.mu.Lock()
-	defer d.mu.Unlock()
-
 	if !d.running {
+		d.mu.Unlock()
 		return nil
 	}
-
-	notify := d.sendCloseNotify()
+	notify := d.signalClosingLocked()
+	d.mu.Unlock()
 
 	d.cancel()
 	<-notify
-	d.running = false
 	return nil
 }
 
@@ -258,14 +296,12 @@ func (d *Dialogue) Close() error {
 // call to Close().
 func (d *Dialogue) Shutdown(ctx context.Context) error {
 	d.mu.Lock()
-	defer d.mu.Unlock()
-
 	if !d.running {
+		d.mu.Unlock()
 		return nil
 	}
-
-	notify := d.sendCloseNotify()
-	d.running = false
+	notify := d.signalClosingLocked()
+	d.mu.Unlock()
 
 	select {
 	case <-notify:
