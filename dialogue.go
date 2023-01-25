@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -355,20 +356,35 @@ func (d *Dialogue) PreamptiveReader() *PreamptiveReader {
 	return d.pr
 }
 
-// Visit visits all the commands available in the dialogue.
+// Visit visits all the commands available in the dialogue at the time of calling in lexicographical order.
 func (d *Dialogue) Visit(fn func(*Command)) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	for _, cmd := range d.commands {
-		fn(cmd)
-	}
+    for _, cmd := range sortCommands(d.commands) {
+        fn(cmd)
+    }
+}
+
+func sortCommands(commands map[string]*Command) []*Command {
+    out := make([]*Command, len(commands))
+
+    var i int
+    for _, c := range commands {
+        out[i] = c
+        i++
+    }
+
+    sort.Slice(out, func(i, j int) bool {
+        return out[i].Name < out[j].Name
+    })
+
+    return out
 }
 
 func (d *Dialogue) defaultCmdNotFound(_ context.Context, args []string) error {
 	fmt.Fprintf(d.W, "Command: %v not found\n", args[0])
-
-	fmt.Fprintln(d.W, d.FormatHelp("", d.commands))
+	fmt.Fprint(d.W, d.FormatHelp("", d.commands))
 
 	return nil
 }
@@ -376,7 +392,7 @@ func (d *Dialogue) defaultCmdNotFound(_ context.Context, args []string) error {
 func defaultHelpFormater(cmd string, cmds map[string]*Command) (out string) {
 	if cmd == "" { // format all commands if no cmd name provided.
 		var b strings.Builder
-		for _, cmd := range cmds {
+		for _, cmd := range sortCommands(cmds) {
 			b.WriteString(cmd.FormatHelp(cmd, false))
 		}
 
