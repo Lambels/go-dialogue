@@ -361,25 +361,25 @@ func (d *Dialogue) Visit(fn func(*Command)) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-    for _, cmd := range sortCommands(d.commands) {
-        fn(cmd)
-    }
+	for _, cmd := range sortCommands(d.commands) {
+		fn(cmd)
+	}
 }
 
 func sortCommands(commands map[string]*Command) []*Command {
-    out := make([]*Command, len(commands))
+	out := make([]*Command, len(commands))
 
-    var i int
-    for _, c := range commands {
-        out[i] = c
-        i++
-    }
+	var i int
+	for _, c := range commands {
+		out[i] = c
+		i++
+	}
 
-    sort.Slice(out, func(i, j int) bool {
-        return out[i].Name < out[j].Name
-    })
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Name < out[j].Name
+	})
 
-    return out
+	return out
 }
 
 func (d *Dialogue) defaultCmdNotFound(_ context.Context, args []string) error {
