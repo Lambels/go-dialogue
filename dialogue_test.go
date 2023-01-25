@@ -137,13 +137,9 @@ func TestHelpCommand(t *testing.T) {
 		d.RegisterCommands(testCommand)
 
 		// initialise commands to access the FormatHelp methods.
-		d.initCommandsLocked()
+		d.init()
 
-		var expected string
-		d.Visit(func(c *Command) {
-			expected += c.FormatHelp(c, false)
-		})
-		w := newWriteExpected(t, []byte(expected))
+		w := newWriteExpected(t, []byte(d.FormatHelp("", d.commands)))
 		d.W = w
 
 		if err := d.Open(); err != ErrDialogueClosed {
@@ -157,6 +153,25 @@ func TestHelpCommand(t *testing.T) {
 }
 
 func TestDefaultCommandNotFound(t *testing.T) {
+	d := Dialogue{
+		R:       strings.NewReader("this command doesnt exits\ntest\nquit\n"),
+		QuitCmd: "quit",
+	}
+	d.RegisterCommands(testCommand)
+
+	d.init()
+
+	expected := "Command: this not found\n" + d.FormatHelp("", d.commands)
+	w := newWriteExpected(t, []byte(expected))
+	d.W = w
+
+	if err := d.Open(); err != ErrDialogueClosed {
+		t.Fatalf("recieved unexpected err: %v", err)
+	}
+
+	if err := w.Flush(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestDefaultCommandQuit(t *testing.T) {
@@ -204,7 +219,7 @@ func (w *writeExpected) Write(p []byte) (int, error) {
 	wn := len(p)
 
 	if wn > len(w.expected[w.wX:]) {
-		err := fmt.Errorf("writeExpected: input buffer to long")
+		err := fmt.Errorf("writeExpected: input buffer to long: %q", p)
 		w.t.Error(err.Error())
 		return 0, err
 	}
@@ -212,7 +227,7 @@ func (w *writeExpected) Write(p []byte) (int, error) {
 	for i, b := range p {
 		expectedB := w.expected[w.wX+i]
 		if b != expectedB {
-			err := fmt.Errorf("writeExpected: missmatched bytes at index %d %v != %v", w.wX+i, expectedB, b)
+			err := fmt.Errorf("writeExpected: missmatched bytes at index %d %v != %v with buffer: %q", w.wX+i, expectedB, b, p)
 			w.t.Error(err.Error())
 
 			// the strings matched till i.
