@@ -1,4 +1,4 @@
-package dialogue_test
+package dialogue
 
 import (
 	"context"
@@ -6,8 +6,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/Lambels/go-dialogue"
 )
 
 // TestReadAll tests wether the preamptive reader can read normally through opperations like io.ReadAll.
@@ -15,7 +13,7 @@ func TestReadAll(t *testing.T) {
 	r := strings.NewReader("Testing")
 	ctx := context.Background()
 
-	pr := dialogue.NewPreamptiveReader(ctx, r)
+	pr := NewPreamptiveReader(ctx, r)
 	out, err := io.ReadAll(pr)
 	if err != nil {
 		t.Fatal(err)
@@ -32,7 +30,7 @@ func TestReadAfterCancel(t *testing.T) {
 	r := strings.NewReader("Testing")
 	ctx, cancel := context.WithCancel(context.Background())
 
-	pr := dialogue.NewPreamptiveReader(ctx, r)
+	pr := NewPreamptiveReader(ctx, r)
 	buf := make([]byte, 7)
 
 	if _, err := pr.Read(buf[:3]); err != nil {
@@ -58,7 +56,7 @@ func TestReadDuringCancel(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	pr := dialogue.NewPreamptiveReader(ctx, r)
+	pr := NewPreamptiveReader(ctx, r)
 	if _, err := pr.Read(make([]byte, 7)); err != context.DeadlineExceeded { // call the underlaying read with an allocated buffer of 7 bytes.
 		t.Fatalf("expected EOF error but got: %v", err)
 	}
