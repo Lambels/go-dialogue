@@ -19,6 +19,7 @@ func main() {
 		R:       os.Stdin,
 		W:       os.Stdout,
 		HelpCmd: "help", // will generate the help command for us, it will be accesible under the "help" keyword.
+		QuitCmd: "quit", // will generate the quit command for us, it will be accesible under the "quit" keyword.
 	}
 
 	fs := flag.NewFlagSet("echo", flag.ContinueOnError)
