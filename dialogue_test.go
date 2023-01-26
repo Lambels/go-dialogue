@@ -37,8 +37,8 @@ func TestShutdownWaitCurrentTransaction(t *testing.T) {
 	select {
 	case err := <-closed:
 		timeElapsed := time.Now().Sub(timeStart)
-		if timeElapsed < 4*time.Second {
-			t.Fatal("expected to close after 4 seconds")
+		if timeElapsed < 3*time.Second {
+			t.Fatal("expected to close after 3 seconds")
 		}
 
 		if err != ErrDialogueClosed {
@@ -175,10 +175,21 @@ func TestDefaultCommandNotFound(t *testing.T) {
 }
 
 func TestDefaultCommandQuit(t *testing.T) {
-}
+    d := &Dialogue{
+        W: newWriteExpected(t, nil),
+        R: strings.NewReader("quit\nsome_other_text\n"),
+        QuitCmd: "quit",
+    }
+    d.RegisterCommands(testCommand)
 
-func TestReadAfterClose(t *testing.T) {
+    if err := d.Open(); err != ErrDialogueClosed {
+        t.Fatalf("recieved unexpected err: %v", err)
+    }
 
+    pr := d.PreamptiveReader()
+    if _, err := pr.Read(make([]byte, 1)); err != io.EOF { // use buffer of size 1 to advance read from memory.
+        t.Fatalf("recieved unexpected err: %v", err)
+    }
 }
 
 func notifyClose(d *Dialogue) <-chan error {
