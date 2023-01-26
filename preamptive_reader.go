@@ -140,7 +140,7 @@ func (r *PreamptiveReader) Read(buf []byte) (int, error) {
 		return 0, r.ctx.Err()
 	case n, ok := <-r.bytesRead:
 		r.buf = nil // nullate the buffer when a 1:1 communication has gone through.
-		
+
 		if !ok {
 			return 0, r.err
 		}
