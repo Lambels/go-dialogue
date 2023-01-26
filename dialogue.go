@@ -137,8 +137,14 @@ func (d *Dialogue) exit(err error) error {
 	defer d.mu.Unlock()
 
 	select {
-	case ack := <-d.close:
+	case ack := <-d.getCloseLocked():
 		ack <- struct{}{} // acknowledge we are closing.
+
+		// dont exit before context is cancelled, we want to make sure that both external cancelling methods (Shutdown and Close)
+		// and the Open go routine exit after the base context is cancelled and the d.closing flag is set to true. This is important
+		// to be synchronised because any calls after Open or Shutdown / Close exit which access the underlaying preamptive reader
+		// have to access it via a cancelled context to provide expected behaviour.
+		<-d.ctx.Done()
 		return ErrDialogueClosed
 	default:
 	}
@@ -239,10 +245,6 @@ the -n flag.`,
 		}
 	}
 
-	if d.close == nil {
-		d.close = make(chan chan struct{}, 1)
-	}
-
 	if d.pr == nil {
 		d.pr = NewPreamptiveReader(d.ctx, d.R)
 	}
@@ -269,12 +271,20 @@ func (d *Dialogue) initCommandsLocked() error {
 	return nil
 }
 
+func (d *Dialogue) getCloseLocked() chan chan struct{} {
+	if d.close == nil {
+		d.close = make(chan chan struct{}, 1)
+	}
+
+	return d.close
+}
+
 func (d *Dialogue) signalClosingLocked() <-chan struct{} {
 	d.running = false
 	ackChan := make(chan struct{}) // unbuffered to provide acknowledgement synchronisation.
 
 	// signal close.
-	d.close <- ackChan
+	d.getCloseLocked() <- ackChan
 	return ackChan
 }
 
@@ -308,7 +318,7 @@ func (d *Dialogue) Shutdown(ctx context.Context) error {
 
 	select {
 	case <-notify:
-		d.cancel() // cancel context to signal to the subsequent preamptive reads.
+		d.cancel()
 		return nil
 	case <-ctx.Done():
 		d.cancel()
